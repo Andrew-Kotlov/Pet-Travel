@@ -1,0 +1,39 @@
+{
+  "name": "pet-travel",
+  "version": "2.0.0",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "engines": {
+    "node": ">=24.15.0 <25",
+    "npm": ">=11 <13"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build --workspace client && npm run build --workspace server",
+    "start": "npm run start --workspace server",
+    "lint": "eslint client/src server/src server/test scripts e2e client/vite.config.js playwright.config.js eslint.config.mjs",
+    "test": "npm run test --workspace server && npm run test --workspace client",
+    "test:integration": "npm run test:integration --workspace server",
+    "db:migrate": "npm run db:migrate --workspace server",
+    "db:seed": "npm run db:seed --workspace server",
+    "test:e2e": "playwright test",
+    "format": "prettier --write client/src server/src server/test scripts e2e"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.1",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.65.1",
+    "eslint": "^10.15.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^16.5.0",
+    "prettier": "^3.10.1"
+  },
+  "overrides": {
+    "sequelize": {
+      "uuid": "^11.1.1"
+    }
+  }
+}
