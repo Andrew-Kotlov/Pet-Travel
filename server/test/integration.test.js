@@ -1,55 +1,548 @@
-const {test}=require('node:test');
-const assert=require('node:assert/strict');
-const {randomBytes}=require('node:crypto');
-const {once}=require('node:events');
-const {WebSocket}=require('ws');
-const {createDatabase}=require('../db/models');
-const {migrate}=require('../src/migrate');
-const {seed}=require('../src/seed');
-const {start}=require('../src/index');
-const {readConfig}=require('../src/config');
-const origin='http://127.0.0.1:5173';
-const password='fictional-integration-password';
-const ownerProfile={name:'Test owner',surname:'',mainPhoto:'',country:'Test',city:'Demo',title:'Test home',introduction:'Test profile',location:'',responsibilities:''};
-const waitMessage=ws=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('WebSocket message timeout')),4000);ws.once('message',data=>{clearTimeout(timer);resolve(JSON.parse(data));});});
-test('PostgreSQL application acceptance', {timeout:60000}, async t=>{
- const url=process.env.TEST_DATABASE_URL;
- assert.ok(url,'TEST_DATABASE_URL is required; tests never silently skip');
- assert.match(new URL(url).pathname,/_test$/,'Only an explicitly named _test database is accepted');
- const schema='pt_test_'+randomBytes(8).toString('hex'),admin=createDatabase(url);
- await admin.sequelize.query('CREATE SCHEMA "'+schema+'"');
- const db=createDatabase(url,false,schema);
- const config={...readConfig({NODE_ENV:'test',PORT:'0',HOST:'127.0.0.1',DATABASE_URL:url,SESSION_SECRET:randomBytes(32).toString('hex'),ALLOWED_ORIGINS:origin,LOG_LEVEL:'silent'}),schema};
- let runtime,base;const sockets=[];
- t.after(async()=>{for(const ws of sockets)ws.terminate();if(runtime)await runtime.close();await db.sequelize.close();await admin.sequelize.query('DROP SCHEMA "'+schema+'" CASCADE');await admin.sequelize.close();});
- await t.test('all migrations run atomically and are repeatable',async()=>{await migrate(db);await migrate(db);const [rows]=await db.sequelize.query('SELECT * FROM "SequelizeMeta"');assert.equal(rows.length,9);});
- runtime=await start(config);base='http://127.0.0.1:'+runtime.server.address().port;
- function client(){return {cookie:'',token:'',async request(path,method='GET',body,headers={}){
-  const res=await fetch(base+path,{method,headers:{...(this.cookie?{Cookie:this.cookie}:{}),Origin:origin,...(body!==undefined?{'Content-Type':'application/json'}:{}),...(this.token?{'X-CSRF-Token':this.token}:{}),...headers},body:body===undefined?undefined:JSON.stringify(body)});
-  const cookie=res.headers.getSetCookie()[0];if(cookie)this.cookie=cookie.split(';')[0];
-  const data=res.status===204?null:await res.json();if(data?.csrfToken)this.token=data.csrfToken;return {status:res.status,data,headers:res.headers};
- }};}
- const alice=client(),bob=client(),eve=client();
- await t.test('liveness readiness and version disclose no secrets',async()=>{for(const path of ['/health/live','/health/ready','/version']){const r=await alice.request(path);assert.equal(r.status,200);assert.ok(r.headers.get('x-request-id'));assert.ok(!JSON.stringify(r.data).includes(url));}});
- await t.test('anonymous profile and CSRF/origin bypasses are denied',async()=>{assert.equal((await alice.request('/api/profile')).status,401);assert.equal((await alice.request('/api/auth/signup','POST',{})).status,403);await alice.request('/api/auth/session');assert.equal((await alice.request('/api/auth/signup','POST',{}, {Origin:'https://evil.example.test'})).status,403);assert.equal((await alice.request('/api/auth/signup','POST',{}, {'X-CSRF-Token':'é'.repeat(64)})).status,403);});
- async function register(c,email,role){await c.request('/api/auth/session');return c.request('/api/auth/signup','POST',{email,name:'Test '+role,password,role});}
- let aliceId,bobId,petId;
- await t.test('signup rotates session, hashes password and rejects duplicates/invalid role',async()=>{const old=alice.cookie;const a=await register(alice,'alice@example.test','parent');assert.equal(a.status,201);aliceId=a.data.user.id;assert.notEqual(alice.cookie,old);assert.equal(a.data.user.password,undefined);assert.equal((await db.User.findByPk(aliceId)).password.startsWith('$2'),true);assert.equal((await register(eve,'ALICE@example.test','parent')).status,409);assert.equal((await register(eve,'bad@example.test','admin')).status,400);const b=await register(bob,'bob@example.test','sitter');assert.equal(b.status,201);bobId=b.data.user.id;assert.equal((await register(eve,'eve@example.test','parent')).status,201);});
- await t.test('session restores identity and login rejects incorrect passwords',async()=>{assert.equal((await alice.request('/api/auth/session')).data.user.id,aliceId);const stranger=client();await stranger.request('/api/auth/session');assert.equal((await stranger.request('/api/auth/login','POST',{email:'alice@example.test',password:'incorrect'})).status,401);assert.equal((await stranger.request('/api/auth/login','POST',{email:'missing@example.test',password})).status,401);assert.equal((await stranger.request('/api/auth/login','POST',{email:'ALICE@example.test',password})).data.user.id,aliceId);});
- await t.test('owner and sitter profiles persist and cannot change role',async()=>{assert.equal((await alice.request('/api/pets')).status,409);assert.equal((await alice.request('/api/profile','PUT',ownerProfile)).status,200);assert.equal((await eve.request('/api/profile','PUT',{...ownerProfile,name:'Other owner'})).status,200);const sitter={name:'Test sitter',surname:'',mainPhoto:'',country:'Test',city:'Demo',status:'Available',aboutMe:'Fictional experience',cats:true,dogs:true,reptiles:false,fish:false,smallPets:false,horses:false,birds:false};assert.equal((await bob.request('/api/profile','PUT',sitter)).status,200);assert.equal((await bob.request('/api/profile')).data.profile.cats,true);assert.equal((await alice.request('/api/profile','PUT',{...ownerProfile,role:'sitter'})).status,400);});
- await t.test('pet CRUD enforces role, ownership and validation',async()=>{const p={petName:'Fictional cat',petAge:3,type:'cat',petPhoto:''};const created=await alice.request('/api/pets','POST',p);assert.equal(created.status,201);petId=created.data.pet.id;assert.equal((await alice.request('/api/pets')).data.pets.length,1);assert.equal((await eve.request('/api/pets')).data.pets.length,0);assert.equal((await eve.request('/api/pets/'+petId,'PUT',p)).status,404);assert.equal((await eve.request('/api/pets/'+petId,'DELETE')).status,404);assert.equal((await bob.request('/api/pets')).status,403);assert.equal((await alice.request('/api/pets/'+petId,'PUT',{...p,petAge:-1})).status,400);assert.equal((await alice.request('/api/pets/'+petId,'PUT',{...p,petAge:4})).data.pet.petAge,4);});
- await t.test('database constraints reject duplicate profiles, foreign keys and invalid roles',async()=>{await assert.rejects(db.ParentProfile.create({UserId:aliceId,country:'Test',city:'Test',title:'Duplicate'}));await assert.rejects(db.Pet.create({ParentProfileId:2147483647,petName:'No owner',type:'cat'}));await assert.rejects(db.User.create({name:'Bad',email:'badrole@example.test',password:'irrelevant',role:'admin'}));});
- async function rejectedSocket(cookie,originValue){const ws=new WebSocket(base.replace('http','ws')+'/ws',{headers:{Origin:originValue,...(cookie?{Cookie:cookie}:{})}});sockets.push(ws);return new Promise((resolve,reject)=>{ws.on('unexpected-response',(_req,res)=>{resolve(res.statusCode);res.resume();ws.terminate();});ws.on('open',()=>reject(Error('Unauthorized socket accepted')));ws.on('error',()=>{});});}
- async function openSocket(c){const ws=new WebSocket(base.replace('http','ws')+'/ws',{headers:{Origin:origin,Cookie:c.cookie}});sockets.push(ws);const ready=waitMessage(ws);await once(ws,'open');assert.equal((await ready).type,'ready');return ws;}
- await t.test('WebSocket requires session and allowed origin',async()=>{assert.equal(await rejectedSocket('',origin),401);assert.equal(await rejectedSocket(alice.cookie,'https://evil.example.test'),403);});
- const aSocket=await openSocket(alice),bSocket=await openSocket(bob);
- await t.test('WebSocket rejects malformed JSON and forged sender without disconnecting',async()=>{let response=waitMessage(aSocket);aSocket.send('{');assert.equal((await response).type,'error');response=waitMessage(aSocket);aSocket.send(JSON.stringify({type:'message',senderId:bobId,recipientId:bobId,text:'forged'}));assert.equal((await response).type,'error');assert.equal(aSocket.readyState,WebSocket.OPEN);});
- await t.test('chat delivers to both parties and persists, history is private',async()=>{const received=waitMessage(bSocket),ack=waitMessage(aSocket);aSocket.send(JSON.stringify({type:'message',recipientId:bobId,text:'Hello fictional sitter'}));assert.equal((await received).message.senderId,aliceId);assert.equal((await ack).message.recipientId,bobId);assert.equal((await bob.request('/api/chat/messages/'+aliceId)).data.messages[0].text,'Hello fictional sitter');assert.equal((await eve.request('/api/chat/messages/'+aliceId)).data.messages.length,0);});
- await t.test('offline delivery is recovered from persisted history',async()=>{bSocket.close();await once(bSocket,'close');const ack=waitMessage(aSocket);aSocket.send(JSON.stringify({type:'message',recipientId:bobId,text:'Saved while offline'}));await ack;const reconnected=await openSocket(bob);assert.equal((await bob.request('/api/chat/messages/'+aliceId)).data.messages.length,2);reconnected.close();});
- await t.test('seed is opt-in, fictional and repeatable',async()=>{await seed(db,password);await seed(db,password);assert.equal(await db.User.count({where:{email:'owner@example.test'}}),1);assert.equal(await db.Pet.count({where:{petName:'Демо Барсик'}}),1);});
- await t.test('sessions and messages survive application restart',async()=>{await runtime.close();runtime=await start(config);base='http://127.0.0.1:'+runtime.server.address().port;assert.equal((await alice.request('/api/auth/session')).data.user.id,aliceId);assert.equal((await bob.request('/api/chat/messages/'+aliceId)).data.messages.length,2);});
- await t.test('logout invalidates HTTP session and closes live sockets',async()=>{const ws=await openSocket(alice);const closed=once(ws,'close');const oldCookie=alice.cookie;assert.equal((await alice.request('/api/auth/logout','POST')).status,204);assert.equal((await closed)[0],1008);alice.cookie=oldCookie;assert.equal((await alice.request('/api/profile')).status,401);});
- await t.test('pet deletion works for its owner',async()=>{await alice.request('/api/auth/session');await alice.request('/api/auth/login','POST',{email:'alice@example.test',password});assert.equal((await alice.request('/api/pets/'+petId,'DELETE')).status,204);assert.equal((await alice.request('/api/pets')).data.pets.length,0);});
- await t.test('readiness fails on missing schema while liveness stays up',async()=>{await db.sequelize.query('ALTER TABLE "Messages" RENAME TO "Messages_unavailable"');assert.equal((await alice.request('/health/ready')).status,503);assert.equal((await alice.request('/health/live')).status,200);await db.sequelize.query('ALTER TABLE "Messages_unavailable" RENAME TO "Messages"');});
+const { test } = require("node:test");
+const assert = require("node:assert/strict");
+const { randomBytes } = require("node:crypto");
+const { once } = require("node:events");
+const { WebSocket } = require("ws");
+const { createDatabase } = require("../db/models");
+const { migrate } = require("../src/migrate");
+const { seed } = require("../src/seed");
+const { start } = require("../src/index");
+const { readConfig } = require("../src/config");
+const origin = "http://127.0.0.1:5173";
+const password = "fictional-integration-password";
+const ownerProfile = {
+  name: "Test owner",
+  surname: "",
+  mainPhoto: "",
+  country: "Test",
+  city: "Demo",
+  title: "Test home",
+  introduction: "Test profile",
+  location: "",
+  responsibilities: "",
+};
+const waitMessage = (ws) =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(Error("WebSocket message timeout")),
+      4000,
+    );
+    ws.once("message", (data) => {
+      clearTimeout(timer);
+      resolve(JSON.parse(data));
+    });
+  });
+test("PostgreSQL application acceptance", { timeout: 60000 }, async (t) => {
+  const url = process.env.TEST_DATABASE_URL;
+  assert.ok(url, "TEST_DATABASE_URL is required; tests never silently skip");
+  assert.match(
+    new URL(url).pathname,
+    /_test$/,
+    "Only an explicitly named _test database is accepted",
+  );
+  const schema = "pt_test_" + randomBytes(8).toString("hex"),
+    admin = createDatabase(url);
+  await admin.sequelize.query('CREATE SCHEMA "' + schema + '"');
+  const db = createDatabase(url, false, schema);
+  const config = {
+    ...readConfig({
+      NODE_ENV: "test",
+      PORT: "0",
+      HOST: "127.0.0.1",
+      DATABASE_URL: url,
+      SESSION_SECRET: randomBytes(32).toString("hex"),
+      ALLOWED_ORIGINS: origin,
+      LOG_LEVEL: "silent",
+    }),
+    schema,
+  };
+  let runtime, base;
+  const sockets = [];
+  t.after(async () => {
+    for (const ws of sockets) ws.terminate();
+    if (runtime) await runtime.close();
+    await db.sequelize.close();
+    await admin.sequelize.query('DROP SCHEMA "' + schema + '" CASCADE');
+    await admin.sequelize.close();
+  });
+  await t.test("all migrations run atomically and are repeatable", async () => {
+    await migrate(db);
+    await migrate(db);
+    const [rows] = await db.sequelize.query('SELECT * FROM "SequelizeMeta"');
+    assert.equal(rows.length, 9);
+  });
+  runtime = await start(config);
+  base = "http://127.0.0.1:" + runtime.server.address().port;
+  await t.test(
+    "occupied port fails cleanly without replacing the server",
+    async () => {
+      await assert.rejects(
+        start({ ...config, PORT: runtime.server.address().port }),
+        { code: "EADDRINUSE" },
+      );
+      assert.equal((await fetch(base + "/health/live")).status, 200);
+    },
+  );
+  function client() {
+    return {
+      cookie: "",
+      token: "",
+      async request(path, method = "GET", body, headers = {}) {
+        const res = await fetch(base + path, {
+          method,
+          headers: {
+            ...(this.cookie ? { Cookie: this.cookie } : {}),
+            Origin: origin,
+            ...(body !== undefined
+              ? { "Content-Type": "application/json" }
+              : {}),
+            ...(this.token ? { "X-CSRF-Token": this.token } : {}),
+            ...headers,
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        const cookie = res.headers.getSetCookie()[0];
+        if (cookie) this.cookie = cookie.split(";")[0];
+        const data = res.status === 204 ? null : await res.json();
+        if (data?.csrfToken) this.token = data.csrfToken;
+        return { status: res.status, data, headers: res.headers };
+      },
+    };
+  }
+  const alice = client(),
+    bob = client(),
+    eve = client();
+  await t.test(
+    "liveness readiness and version disclose no secrets",
+    async () => {
+      for (const path of ["/health/live", "/health/ready", "/version"]) {
+        const r = await alice.request(path);
+        assert.equal(r.status, 200);
+        assert.ok(r.headers.get("x-request-id"));
+        assert.ok(!JSON.stringify(r.data).includes(url));
+      }
+    },
+  );
+  await t.test(
+    "anonymous profile and CSRF/origin bypasses are denied",
+    async () => {
+      assert.equal((await alice.request("/api/profile")).status, 401);
+      assert.equal(
+        (await alice.request("/api/auth/signup", "POST", {})).status,
+        403,
+      );
+      await alice.request("/api/auth/session");
+      assert.equal(
+        (
+          await alice.request(
+            "/api/auth/signup",
+            "POST",
+            {},
+            { Origin: "https://evil.example.test" },
+          )
+        ).status,
+        403,
+      );
+      assert.equal(
+        (
+          await alice.request(
+            "/api/auth/signup",
+            "POST",
+            {},
+            { "X-CSRF-Token": "é".repeat(64) },
+          )
+        ).status,
+        403,
+      );
+    },
+  );
+  async function register(c, email, role) {
+    await c.request("/api/auth/session");
+    return c.request("/api/auth/signup", "POST", {
+      email,
+      name: "Test " + role,
+      password,
+      role,
+    });
+  }
+  let aliceId, bobId, petId;
+  await t.test(
+    "signup rotates session, hashes password and rejects duplicates/invalid role",
+    async () => {
+      const old = alice.cookie;
+      const a = await register(alice, "alice@example.test", "parent");
+      assert.equal(a.status, 201);
+      aliceId = a.data.user.id;
+      assert.notEqual(alice.cookie, old);
+      assert.equal(a.data.user.password, undefined);
+      assert.equal(
+        (await db.User.findByPk(aliceId)).password.startsWith("$2"),
+        true,
+      );
+      assert.equal(
+        (await register(eve, "ALICE@example.test", "parent")).status,
+        409,
+      );
+      assert.equal(
+        (await register(eve, "bad@example.test", "admin")).status,
+        400,
+      );
+      const b = await register(bob, "bob@example.test", "sitter");
+      assert.equal(b.status, 201);
+      bobId = b.data.user.id;
+      assert.equal(
+        (await register(eve, "eve@example.test", "parent")).status,
+        201,
+      );
+    },
+  );
+  await t.test(
+    "session restores identity and login rejects incorrect passwords",
+    async () => {
+      assert.equal(
+        (await alice.request("/api/auth/session")).data.user.id,
+        aliceId,
+      );
+      const stranger = client();
+      await stranger.request("/api/auth/session");
+      assert.equal(
+        (
+          await stranger.request("/api/auth/login", "POST", {
+            email: "alice@example.test",
+            password: "incorrect",
+          })
+        ).status,
+        401,
+      );
+      assert.equal(
+        (
+          await stranger.request("/api/auth/login", "POST", {
+            email: "missing@example.test",
+            password,
+          })
+        ).status,
+        401,
+      );
+      assert.equal(
+        (
+          await stranger.request("/api/auth/login", "POST", {
+            email: "ALICE@example.test",
+            password,
+          })
+        ).data.user.id,
+        aliceId,
+      );
+    },
+  );
+  await t.test(
+    "owner and sitter profiles persist and cannot change role",
+    async () => {
+      assert.equal((await alice.request("/api/pets")).status, 409);
+      assert.equal(
+        (await alice.request("/api/profile", "PUT", ownerProfile)).status,
+        200,
+      );
+      assert.equal(
+        (
+          await eve.request("/api/profile", "PUT", {
+            ...ownerProfile,
+            name: "Other owner",
+          })
+        ).status,
+        200,
+      );
+      const sitter = {
+        name: "Test sitter",
+        surname: "",
+        mainPhoto: "",
+        country: "Test",
+        city: "Demo",
+        status: "Available",
+        aboutMe: "Fictional experience",
+        cats: true,
+        dogs: true,
+        reptiles: false,
+        fish: false,
+        smallPets: false,
+        horses: false,
+        birds: false,
+      };
+      assert.equal(
+        (await bob.request("/api/profile", "PUT", sitter)).status,
+        200,
+      );
+      assert.equal((await bob.request("/api/profile")).data.profile.cats, true);
+      assert.equal(
+        (
+          await alice.request("/api/profile", "PUT", {
+            ...ownerProfile,
+            role: "sitter",
+          })
+        ).status,
+        400,
+      );
+    },
+  );
+  await t.test("pet CRUD enforces role, ownership and validation", async () => {
+    const p = {
+      petName: "Fictional cat",
+      petAge: 3,
+      type: "cat",
+      petPhoto: "",
+    };
+    const created = await alice.request("/api/pets", "POST", p);
+    assert.equal(created.status, 201);
+    petId = created.data.pet.id;
+    assert.equal((await alice.request("/api/pets")).data.pets.length, 1);
+    assert.equal((await eve.request("/api/pets")).data.pets.length, 0);
+    assert.equal(
+      (await eve.request("/api/pets/" + petId, "PUT", p)).status,
+      404,
+    );
+    assert.equal(
+      (await eve.request("/api/pets/" + petId, "DELETE")).status,
+      404,
+    );
+    assert.equal((await bob.request("/api/pets")).status, 403);
+    assert.equal(
+      (await alice.request("/api/pets/" + petId, "PUT", { ...p, petAge: -1 }))
+        .status,
+      400,
+    );
+    assert.equal(
+      (await alice.request("/api/pets/" + petId, "PUT", { ...p, petAge: 4 }))
+        .data.pet.petAge,
+      4,
+    );
+  });
+  await t.test(
+    "database constraints reject duplicate profiles, foreign keys and invalid roles",
+    async () => {
+      await assert.rejects(
+        db.ParentProfile.create({
+          UserId: aliceId,
+          country: "Test",
+          city: "Test",
+          title: "Duplicate",
+        }),
+      );
+      await assert.rejects(
+        db.Pet.create({
+          ParentProfileId: 2147483647,
+          petName: "No owner",
+          type: "cat",
+        }),
+      );
+      await assert.rejects(
+        db.User.create({
+          name: "Bad",
+          email: "badrole@example.test",
+          password: "irrelevant",
+          role: "admin",
+        }),
+      );
+    },
+  );
+  async function rejectedSocket(cookie, originValue) {
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws", {
+      headers: { Origin: originValue, ...(cookie ? { Cookie: cookie } : {}) },
+    });
+    sockets.push(ws);
+    return new Promise((resolve, reject) => {
+      ws.on("unexpected-response", (_req, res) => {
+        resolve(res.statusCode);
+        res.resume();
+        ws.terminate();
+      });
+      ws.on("open", () => reject(Error("Unauthorized socket accepted")));
+      ws.on("error", () => {});
+    });
+  }
+  async function openSocket(c) {
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws", {
+      headers: { Origin: origin, Cookie: c.cookie },
+    });
+    sockets.push(ws);
+    const ready = waitMessage(ws);
+    await once(ws, "open");
+    assert.equal((await ready).type, "ready");
+    return ws;
+  }
+  await t.test("WebSocket requires session and allowed origin", async () => {
+    assert.equal(await rejectedSocket("", origin), 401);
+    assert.equal(
+      await rejectedSocket(alice.cookie, "https://evil.example.test"),
+      403,
+    );
+  });
+  const aSocket = await openSocket(alice),
+    bSocket = await openSocket(bob);
+  await t.test(
+    "WebSocket rejects malformed JSON and forged sender without disconnecting",
+    async () => {
+      let response = waitMessage(aSocket);
+      aSocket.send("{");
+      assert.equal((await response).type, "error");
+      response = waitMessage(aSocket);
+      aSocket.send(
+        JSON.stringify({
+          type: "message",
+          senderId: bobId,
+          recipientId: bobId,
+          text: "forged",
+        }),
+      );
+      assert.equal((await response).type, "error");
+      assert.equal(aSocket.readyState, WebSocket.OPEN);
+    },
+  );
+  await t.test(
+    "chat delivers to both parties and persists, history is private",
+    async () => {
+      const received = waitMessage(bSocket),
+        ack = waitMessage(aSocket);
+      aSocket.send(
+        JSON.stringify({
+          type: "message",
+          recipientId: bobId,
+          text: "Hello fictional sitter",
+        }),
+      );
+      assert.equal((await received).message.senderId, aliceId);
+      assert.equal((await ack).message.recipientId, bobId);
+      assert.equal(
+        (await bob.request("/api/chat/messages/" + aliceId)).data.messages[0]
+          .text,
+        "Hello fictional sitter",
+      );
+      assert.equal(
+        (await eve.request("/api/chat/messages/" + aliceId)).data.messages
+          .length,
+        0,
+      );
+    },
+  );
+  await t.test(
+    "offline delivery is recovered from persisted history",
+    async () => {
+      bSocket.close();
+      await once(bSocket, "close");
+      const ack = waitMessage(aSocket);
+      aSocket.send(
+        JSON.stringify({
+          type: "message",
+          recipientId: bobId,
+          text: "Saved while offline",
+        }),
+      );
+      await ack;
+      const reconnected = await openSocket(bob);
+      assert.equal(
+        (await bob.request("/api/chat/messages/" + aliceId)).data.messages
+          .length,
+        2,
+      );
+      reconnected.close();
+    },
+  );
+  await t.test("seed is opt-in, fictional and repeatable", async () => {
+    await seed(db, password);
+    await seed(db, password);
+    assert.equal(
+      await db.User.count({ where: { email: "owner@example.test" } }),
+      1,
+    );
+    assert.equal(await db.Pet.count({ where: { petName: "Демо Барсик" } }), 1);
+  });
+  await t.test(
+    "sessions and messages survive application restart",
+    async () => {
+      await runtime.close();
+      runtime = await start(config);
+      base = "http://127.0.0.1:" + runtime.server.address().port;
+      assert.equal(
+        (await alice.request("/api/auth/session")).data.user.id,
+        aliceId,
+      );
+      assert.equal(
+        (await bob.request("/api/chat/messages/" + aliceId)).data.messages
+          .length,
+        2,
+      );
+    },
+  );
+  await t.test(
+    "a revoked recipient session receives no further private messages",
+    async () => {
+      const eveId = (await eve.request("/api/auth/session")).data.user.id;
+      const receiver = await openSocket(eve);
+      const sender = await openSocket(alice);
+      const serverSocket = [...runtime.chat.wss.clients].find(
+        (ws) => ws.userId === eveId,
+      );
+      await new Promise((resolve, reject) =>
+        runtime.store.destroy(serverSocket.sessionId, (error) =>
+          error ? reject(error) : resolve(),
+        ),
+      );
+      let leaked = false;
+      receiver.on("message", () => {
+        leaked = true;
+      });
+      const closed = once(receiver, "close");
+      const ack = waitMessage(sender);
+      sender.send(
+        JSON.stringify({
+          type: "message",
+          recipientId: eveId,
+          text: "Only the account may recover this later",
+        }),
+      );
+      await ack;
+      assert.equal((await closed)[0], 1008);
+      assert.equal(leaked, false);
+      sender.close();
+      await once(sender, "close");
+    },
+  );
+  await t.test(
+    "logout invalidates HTTP session and closes live sockets",
+    async () => {
+      const ws = await openSocket(alice);
+      const closed = once(ws, "close");
+      const oldCookie = alice.cookie;
+      assert.equal(
+        (await alice.request("/api/auth/logout", "POST")).status,
+        204,
+      );
+      assert.equal((await closed)[0], 1008);
+      alice.cookie = oldCookie;
+      assert.equal((await alice.request("/api/profile")).status, 401);
+    },
+  );
+  await t.test("pet deletion works for its owner", async () => {
+    await alice.request("/api/auth/session");
+    await alice.request("/api/auth/login", "POST", {
+      email: "alice@example.test",
+      password,
+    });
+    assert.equal(
+      (await alice.request("/api/pets/" + petId, "DELETE")).status,
+      204,
+    );
+    assert.equal((await alice.request("/api/pets")).data.pets.length, 0);
+  });
+  await t.test(
+    "readiness fails on missing schema while liveness stays up",
+    async () => {
+      await db.sequelize.query(
+        'ALTER TABLE "Messages" RENAME TO "Messages_unavailable"',
+      );
+      assert.equal((await alice.request("/health/ready")).status, 503);
+      assert.equal((await alice.request("/health/live")).status, 200);
+      await db.sequelize.query(
+        'ALTER TABLE "Messages_unavailable" RENAME TO "Messages"',
+      );
+    },
+  );
 });
-

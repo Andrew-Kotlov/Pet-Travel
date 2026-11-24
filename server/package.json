@@ -11,7 +11,7 @@
     "build": "node ../scripts/check-server.mjs",
     "lint": "eslint src test",
     "test": "node --test test/unit.test.js",
-    "test:integration": "node --env-file-if-exists=../.env.test --test --test-concurrency=1 test/integration.test.js",
+    "test:integration": "node --env-file-if-exists=../.env.test --test --test-concurrency=1 test/integration.test.js test/migration.test.js",
     "db:migrate": "node --env-file-if-exists=../.env src/migrate.js",
     "db:seed": "node --env-file-if-exists=../.env src/seed.js"
   },
