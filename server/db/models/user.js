@@ -14,9 +14,9 @@ module.exports = (sequelize, DataTypes) => {
     }) {
       this.hasMany(Verification);
       this.hasMany(AppReview);
-      this.hasMany(SitterProfile);
+      this.hasOne(SitterProfile);
       this.hasMany(SitterReview);
-      this.hasMany(ParentProfile);
+      this.hasOne(ParentProfile);
       this.hasMany(ParentReview);
     }
   }

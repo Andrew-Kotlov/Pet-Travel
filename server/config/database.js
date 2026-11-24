@@ -1,26 +1,5 @@
-require('dotenv').config();
-
-module.exports = {
-  development: {
-    username: process.env.DB_USER,
-    password: process.env.DB__PASSWORD,
-    database: process.env.DATABASE,
-    host: '127.0.0.1',
-    dialect: 'postgres',
-    port: process.env.DB_PORT,
-  },
-  test: {
-    username: 'root',
-    password: null,
-    database: 'database_test',
-    host: '127.0.0.1',
-    dialect: 'mysql',
-  },
-  production: {
-    username: 'root',
-    password: null,
-    database: 'database_production',
-    host: '127.0.0.1',
-    dialect: 'mysql',
-  },
-};
+// Sequelize configuration uses the same URL in every environment. Tests explicitly inject their own URL.
+module.exports = Object.fromEntries(['development', 'test', 'production'].map(env => [env, {
+  use_env_variable: 'DATABASE_URL', dialect: 'postgres', logging: false,
+  dialectOptions: process.env.DB_SSL === 'true' ? { ssl: { require: true, rejectUnauthorized: true } } : {}
+}]));
