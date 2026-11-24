@@ -1,17 +1,17 @@
 <div align="center">
 
-# 🐾 Pet-Travel
+<h1>🐾 Pet-Travel</h1>
 
-**Платформа о заботе о питомцах: владельцы животных, петситтеры, полезные материалы и общение.**
+<p><strong>Платформа о заботе о питомцах: владельцы животных, петситтеры, полезные материалы и общение.</strong></p>
 
-![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)
-![Redux](https://img.shields.io/badge/Redux-764ABC?style=for-the-badge&logo=redux&logoColor=white)
-![Node.js](https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)
-![Express](https://img.shields.io/badge/Express-343434?style=for-the-badge&logo=express&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
+<img alt="React" src="https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB" />
+<img alt="Redux" src="https://img.shields.io/badge/Redux-764ABC?style=for-the-badge&logo=redux&logoColor=white" />
+<img alt="Node.js" src="https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" />
+<img alt="Express" src="https://img.shields.io/badge/Express-343434?style=for-the-badge&logo=express&logoColor=white" />
+<img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" />
 
-![Project](https://img.shields.io/badge/Status-Prototype-F59E0B?style=flat-square)
-![Focus](https://img.shields.io/badge/Next-Modernization_%26_DevOps-198754?style=flat-square)
+<img alt="Project" src="https://img.shields.io/badge/Status-Prototype-F59E0B?style=flat-square" />
+<img alt="Focus" src="https://img.shields.io/badge/Next-Modernization_%26_DevOps-198754?style=flat-square" />
 
 </div>
 
